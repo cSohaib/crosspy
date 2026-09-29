@@ -33,7 +33,7 @@ class KeyboardEntryActivity : public Activity {
   void render(RenderLock&&) override;
   bool preventAutoSleep() override { return true; }
 
- private:
+ protected:
   std::string title;
   std::string text;
   size_t maxLength;
@@ -104,9 +104,12 @@ class KeyboardEntryActivity : public Activity {
   bool hintVisible = false;
   unsigned long hintShowTime = 0;
 
-  void onComplete(std::string text);
-  void onCancel();
-  bool cursorPositionFromPoint(int x, int y, size_t& position) const;
+  virtual void onComplete(const std::string& text);
+  virtual void onCancel();
+  virtual bool renderCustomField() { return false; }
+  virtual const char* enterLabel() const;
+  virtual void textChanged() {}
+  virtual bool cursorPositionFromPoint(int x, int y, size_t& position) const;
   std::string displayTextForCurrentState() const;
   // Advance of s[start, end) measured in place by temporarily null-terminating
   // at `end` — avoids a substr temporary per measurement.
@@ -129,8 +132,8 @@ class KeyboardEntryActivity : public Activity {
   bool activateValue(int16_t value, bool longPress);
   bool clearAllOrAltOnSelected();
 
-  void insertUtf8(const char* out);
-  bool backspaceUtf8();
+  virtual void insertUtf8(const char* out);
+  virtual bool backspaceUtf8();
   static size_t utf8Prev(const std::string& s, size_t pos);
   static size_t utf8Next(const std::string& s, size_t pos);
 

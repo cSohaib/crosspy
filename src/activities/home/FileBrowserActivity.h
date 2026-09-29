@@ -17,6 +17,8 @@ class FileBrowserActivity final : public UiListActivity {
   bool removeDirFile(const std::string& fullPath);
   void showEntryActions();
   void startRename();
+  void startNewTextFile();
+  void editTextFile(const std::string& path, bool existing);
   void renameSelectedFile(const std::string& oldPath, const std::string& oldEntry, const std::string& newStem,
                           const std::string& extension);
   void deleteSelected();
