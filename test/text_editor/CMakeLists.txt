@@ -1,0 +1,3 @@
+add_executable(text_editor_tests main.cpp)
+target_link_libraries(text_editor_tests PRIVATE crosspoint_test_common)
+add_test(NAME text_editor_tests COMMAND text_editor_tests)

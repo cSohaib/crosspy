@@ -1,5 +1,6 @@
 #include "FileBrowserActivity.h"
 
+#include <BoardConfig.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -14,6 +15,7 @@
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "activities/editor/TextEditorActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
@@ -111,7 +113,7 @@ void FileBrowserActivity::loadFiles() {
   size_t entryCount = 0;
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) ++entryCount;
   root.rewindDirectory();
-  files.reserve(entryCount);
+  files.reserve(entryCount + 1);
 
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(fileNameBuffer.get(), NAME_BUFFER_SIZE);
@@ -138,6 +140,7 @@ void FileBrowserActivity::loadFiles() {
   }
   root.close();
   FsHelpers::sortFileList(files);
+  if (mode == Mode::Books && BoardConfig::isX4Pro()) files.insert(files.begin(), "");
 }
 
 // fui::ListProps::rowProvider — formats row `index` from files[index] into the
@@ -152,6 +155,12 @@ void FileBrowserActivity::provideRow(void* ctx, const uint16_t index, fui::ListI
   auto* self = static_cast<FileBrowserActivity*>(ctx);
   if (index >= self->files.size()) return;
   const std::string& entry = self->files[index];
+  if (entry.empty()) {
+    item.label = tr(STR_EDITOR_NEW);
+    item.value = nullptr;
+    item.actionValue = static_cast<int16_t>(index);
+    return;
+  }
   formatFileName(entry, self->rowNameBuf, sizeof(self->rowNameBuf));
   item.label = self->rowNameBuf;
   formatFileExtension(entry, self->rowExtBuf, sizeof(self->rowExtBuf));
@@ -190,6 +199,7 @@ void FileBrowserActivity::prewarmRowGlyphs(const int start) {
       [](const void* ctx, uint32_t i) -> const char* {
         auto* c = const_cast<PrewarmCtx*>(static_cast<const PrewarmCtx*>(ctx));
         if (i < static_cast<uint32_t>(c->count)) {
+          if (c->self->files[c->first + i].empty()) return tr(STR_EDITOR_NEW);
           formatFileName(c->self->files[c->first + i], c->self->rowNameBuf, sizeof(c->self->rowNameBuf));
           return c->self->rowNameBuf;
         }
@@ -337,6 +347,10 @@ void FileBrowserActivity::activateSelected() {
   if (nav.selected < 0 || nav.selected >= listCount()) return;
 
   const std::string& entry = files[nav.selected];
+  if (entry.empty()) {
+    startNewTextFile();
+    return;
+  }
   bool isDirectory = (entry.back() == '/');
 
   // Firmware picker: select file -> return path; navigate into directories normally.
@@ -375,17 +389,26 @@ void FileBrowserActivity::showEntryActions() {
     return;
   }
 
+  if (files[nav.selected].empty()) {
+    startNewTextFile();
+    return;
+  }
+  const bool editable = BoardConfig::isX4Pro() && FsHelpers::checkFileExtension(files[nav.selected], ".txt");
   const bool isDirectory = files[nav.selected].back() == '/';
   static constexpr StrId FILE_OPTIONS[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_RENAME};
+  static constexpr StrId TEXT_OPTIONS[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_RENAME,
+                                           StrId::STR_EDITOR_EDIT};
   static constexpr StrId DIRECTORY_OPTIONS[] = {StrId::STR_OPEN, StrId::STR_DELETE};
-  optionPopup.show(StrId::STR_FILENAME, isDirectory ? DIRECTORY_OPTIONS : FILE_OPTIONS, isDirectory ? 2 : 3, 0,
-                   [this](const int index) {
+  optionPopup.show(StrId::STR_FILENAME, isDirectory ? DIRECTORY_OPTIONS : (editable ? TEXT_OPTIONS : FILE_OPTIONS),
+                   isDirectory ? 2 : (editable ? 4 : 3), 0, [this](const int index) {
                      if (index == 0) {
                        activateSelected();
                      } else if (index == 1) {
                        deleteSelected();
                      } else if (index == 2) {
                        startRename();
+                     } else if (index == 3) {
+                       editTextFile(basepath + (basepath.back() == '/' ? "" : "/") + files[nav.selected], true);
                      }
                    });
   requestUpdate();
@@ -397,6 +420,7 @@ void FileBrowserActivity::deleteSelected() {
   std::string cleanBasePath = basepath;
   if (cleanBasePath.back() != '/') cleanBasePath += "/";
   const std::string entry = files[nav.selected];
+  if (entry.empty()) return;
   const std::string fullPath = cleanBasePath + entry;
 
   auto handler = [this, fullPath](const ActivityResult& res) {
@@ -438,7 +462,7 @@ void FileBrowserActivity::startRename() {
   if (files.empty() || nav.selected < 0 || nav.selected >= listCount()) return;
 
   const std::string oldEntry = files[nav.selected];
-  if (oldEntry.back() == '/') return;
+  if (oldEntry.empty() || oldEntry.back() == '/') return;
 
   std::string cleanBasePath = basepath;
   if (cleanBasePath.back() != '/') cleanBasePath += "/";
@@ -688,4 +712,40 @@ void FileBrowserActivity::drawFooter() {
 size_t FileBrowserActivity::findEntry(const std::string& name) const {
   const auto entry = std::find(files.begin(), files.end(), name);
   return entry != files.end() ? static_cast<size_t>(entry - files.begin()) : 0;
+}
+
+void FileBrowserActivity::editTextFile(const std::string& path, bool existing) {
+  auto editor = makeUniqueNoThrow<TextEditorActivity>(renderer, mappedInput, path, existing);
+  if (!editor) {
+    LOG_ERR("FileBrowser", "OOM: text editor");
+    return;
+  }
+  startActivityForResult(std::move(editor), [this](const ActivityResult&) {
+    RenderLock lock(*this);
+    loadFiles();
+    nav.selected = std::min(nav.selected.load(), std::max(0, listCount() - 1));
+    nav.follow(listCount());
+  });
+}
+
+void FileBrowserActivity::startNewTextFile() {
+  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_EDITOR_NEW), "note.txt", 120);
+  if (!keyboard) {
+    LOG_ERR("FileBrowser", "OOM: filename keyboard");
+    return;
+  }
+  startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
+    if (result.isCancelled) return;
+    std::string name = std::get<KeyboardResult>(result.data).text;
+    if (!FsHelpers::checkFileExtension(name, ".txt")) name += ".txt";
+    const std::string path = basepath + (basepath.back() == '/' ? "" : "/") + name;
+    if (name.find_first_of(":*?\"<>|") != std::string::npos || name == ".txt" || name.front() == '.' ||
+        !FsHelpers::isSafePathComponent(name) || Storage.exists(path.c_str())) {
+      RenderLock lock(*this);
+      static constexpr StrId options[] = {StrId::STR_OK_BUTTON};
+      optionPopup.show(StrId::STR_EDITOR_NAME_ERROR, options, 1, 0, [](int) {});
+      return;
+    }
+    editTextFile(path, false);
+  });
 }
